@@ -40,9 +40,13 @@ const TWELVELABS_BASE_URL = (process.env.TWELVELABS_BASE_URL ?? "https://api.twe
 const TWELVELABS_INDEX_NAME = process.env.TWELVELABS_INDEX_NAME ?? "morngpt-intl-video-index";
 const TWELVELABS_VIDEO_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const TWELVELABS_ANALYSIS_CACHE_TTL_MS = 10 * 60 * 1000;
+const TWELVELABS_TASK_CACHE_TTL_MS = 30 * 60 * 1000;
 const TWELVELABS_REQUEST_MAX_RETRIES = 2;
 const TWELVELABS_REQUEST_BASE_DELAY_MS = 1200;
-const ENABLE_INTL_VIDEO_SECOND_PASS = process.env.INTL_VIDEO_SECOND_PASS === "1";
+const TWELVELABS_TASK_POLL_WAIT_MS = 10000;
+const TWELVELABS_TASK_POLL_INTERVAL_MS = 900;
+const INTL_VIDEO_ULTRA_SPEED_MODE = false;
+const ENABLE_INTL_VIDEO_SECOND_PASS = true;
 const VIDEO_QA_PROMPT_ZH =
   "你将基于视频内容和用户问题进行分析。必须严格使用中文简体回答，禁止切换到其他语言。除非用户明确要求时间轴，否则禁止逐秒罗列画面。";
 const VIDEO_QA_PROMPT_EN =
@@ -62,9 +66,29 @@ const GUEST_DAILY_LIMIT = (() => {
   return Math.min(100, n);
 })();
 
+type SharedIntlVideoCache = {
+  videoIds: Map<string, { videoId: string; expiresAt: number }>;
+  tasks: Map<string, { taskId: string; expiresAt: number }>;
+};
+
+function getSharedIntlVideoCache() {
+  const globalScope = globalThis as typeof globalThis & {
+    __intlTwelveLabsVideoCache?: SharedIntlVideoCache;
+  };
+  if (!globalScope.__intlTwelveLabsVideoCache) {
+    globalScope.__intlTwelveLabsVideoCache = {
+      videoIds: new Map<string, { videoId: string; expiresAt: number }>(),
+      tasks: new Map<string, { taskId: string; expiresAt: number }>(),
+    };
+  }
+  return globalScope.__intlTwelveLabsVideoCache;
+}
+
 const ipRateLimitCache = new Map<string, { count: number; resetTime: number }>();
 let cachedTwelveLabsIndexId: string | null = process.env.TWELVELABS_INDEX_ID ?? null;
-const cachedTwelveLabsVideoIds = new Map<string, { videoId: string; expiresAt: number }>();
+const sharedIntlVideoCache = getSharedIntlVideoCache();
+const cachedTwelveLabsVideoIds = sharedIntlVideoCache.videoIds;
+const cachedTwelveLabsTasks = sharedIntlVideoCache.tasks;
 const cachedTwelveLabsAnalysis = new Map<string, { text: string; expiresAt: number }>();
 
 type IncomingMessage = {
@@ -107,6 +131,27 @@ function writeCachedVideoId(cacheKey: string, videoId: string) {
     videoId,
     expiresAt: Date.now() + TWELVELABS_VIDEO_CACHE_TTL_MS,
   });
+}
+
+function readCachedTwelveLabsTask(cacheKey: string) {
+  const entry = cachedTwelveLabsTasks.get(cacheKey);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    cachedTwelveLabsTasks.delete(cacheKey);
+    return null;
+  }
+  return entry.taskId;
+}
+
+function writeCachedTwelveLabsTask(cacheKey: string, taskId: string) {
+  cachedTwelveLabsTasks.set(cacheKey, {
+    taskId,
+    expiresAt: Date.now() + TWELVELABS_TASK_CACHE_TTL_MS,
+  });
+}
+
+function deleteCachedTwelveLabsTask(cacheKey: string) {
+  cachedTwelveLabsTasks.delete(cacheKey);
 }
 
 function createAnalysisCacheKey(videoId: string, prompt: string, language: "zh" | "en") {
@@ -696,6 +741,55 @@ function buildVideoQaPrompt(userQuestion: string, language: "zh" | "en") {
   ].join("\n");
 }
 
+function buildVideoSummaryQuestion(language: "zh" | "en") {
+  if (language === "zh") {
+    return "请简短描述这个视频的核心内容，最多2句，不要时间轴。";
+  }
+  return "Please briefly describe the core content of this video in at most 2 sentences, without timeline.";
+}
+
+function buildVideoSummaryQaPrompt(
+  userQuestion: string,
+  videoSummary: string,
+  language: "zh" | "en",
+) {
+  const question =
+    userQuestion?.trim() ||
+    (language === "zh"
+      ? "请基于视频内容给出关键结论。"
+      : "Please answer based on the video content.");
+  const answerFormatRule = buildVideoAnswerFormatRule(question, language);
+  const normalizedSummary = truncateVideoText((videoSummary || "").trim(), 2000);
+
+  if (language === "zh") {
+    return [
+      "你将收到“视频内容摘要”和“用户问题”。",
+      "请仅基于摘要回答，禁止编造摘要之外的细节；若信息不足请明确说明。",
+      answerFormatRule,
+      "",
+      `用户问题：${question}`,
+      "",
+      "视频内容摘要：",
+      normalizedSummary,
+      "",
+      "请直接输出最终回答。",
+    ].join("\n");
+  }
+
+  return [
+    "You will receive a video summary and a user question.",
+    "Answer strictly from the summary. Do not invent details not present in the summary; if evidence is insufficient, say so clearly.",
+    answerFormatRule,
+    "",
+    `User question: ${question}`,
+    "",
+    "Video summary:",
+    normalizedSummary,
+    "",
+    "Return only the final answer.",
+  ].join("\n");
+}
+
 function isLowInformationVideoAnalysis(text: string, language: "zh" | "en") {
   const raw = (text || "").trim();
   if (!raw) return true;
@@ -785,6 +879,20 @@ async function normalizeVideoAnalysisOutput(
     cleanedSecondTokenCount: cleanedTimelineStats.secondTokenCount,
     shouldPostProcess,
   });
+
+  if (INTL_VIDEO_ULTRA_SPEED_MODE) {
+    const fastNormalized = enforceVideoAnswerStyle(
+      truncateVideoText(cleaned, 2200).trim(),
+      userQuestion,
+      language,
+    );
+    console.info("[intl/video] normalize ultra-speed", {
+      language,
+      outputLength: fastNormalized.length,
+      skippedPostProcess: shouldPostProcess,
+    });
+    return fastNormalized;
+  }
 
   if (!shouldPostProcess) {
     return enforceVideoAnswerStyle(
@@ -1152,6 +1260,39 @@ async function analyzeVideoByVideoId(videoId: string, prompt: string, language: 
   return text;
 }
 
+async function waitForTwelveLabsTaskVideoId(taskId: string, waitMs: number) {
+  const deadline = Date.now() + waitMs;
+  let pollCount = 0;
+
+  while (Date.now() < deadline) {
+    pollCount += 1;
+    const status = await twelvelabsJson<{ status?: string; video_id?: string; error?: any }>(
+      `/tasks/${taskId}`,
+    );
+    const normalizedStatus = (status.status || "").toLowerCase();
+
+    if (normalizedStatus === "ready" && status.video_id) {
+      return status.video_id;
+    }
+
+    if (["failed", "error"].includes(normalizedStatus)) {
+      throw fail(`TwelveLabs task failed: ${JSON.stringify(status.error || "unknown")}`, 502);
+    }
+
+    if (pollCount % 8 === 0) {
+      console.info("[intl/video] task polling", {
+        taskId,
+        status: normalizedStatus || "unknown",
+        pollCount,
+      });
+    }
+
+    await waitFor(TWELVELABS_TASK_POLL_INTERVAL_MS);
+  }
+
+  return null;
+}
+
 async function analyzeVideo(
   videoUrl: string,
   prompt: string,
@@ -1159,6 +1300,10 @@ async function analyzeVideo(
   sourceVideoId?: string,
   forceFresh = false,
 ) {
+  if (!process.env.TWELVELABS_API_KEY) {
+    throw fail("Missing TWELVELABS_API_KEY", 400);
+  }
+
   const sourceCacheKey =
     sourceVideoId && sourceVideoId.trim().length > 0
       ? createVideoSourceCacheKey(sourceVideoId.trim())
@@ -1178,36 +1323,70 @@ async function analyzeVideo(
       videoId,
     });
   } else {
-    const indexId = await ensureTwelveLabsIndex();
-    const videoRes = await internationalProviderFetch("twelvelabs", videoUrl);
-    if (!videoRes.ok) throw fail(`Failed to fetch video (HTTP ${videoRes.status})`, 400);
-    const mimeType = (videoRes.headers.get("content-type") || "video/mp4").split(";")[0];
-    const bytes = Buffer.from(await videoRes.arrayBuffer());
+    const cachedTaskId =
+      !forceFresh
+        ? (sourceCacheKey ? readCachedTwelveLabsTask(sourceCacheKey) : null) ||
+          readCachedTwelveLabsTask(urlCacheKey)
+        : null;
 
-    const formData = new FormData();
-    formData.append("index_id", indexId);
-    formData.append("video_file", new Blob([bytes], { type: mimeType }), `video-${Date.now()}.mp4`);
-    formData.append("enable_video_stream", "false");
-
-    const task = await twelvelabsJson<{ _id?: string }>("/tasks", { method: "POST", body: formData });
-    if (!task._id) throw fail("TwelveLabs create task failed", 502);
-
-    const deadline = Date.now() + 160000;
-    while (Date.now() < deadline) {
-      const status = await twelvelabsJson<{ status?: string; video_id?: string; error?: any }>(`/tasks/${task._id}`);
-      if ((status.status || "").toLowerCase() === "ready" && status.video_id) {
-        videoId = status.video_id;
-        break;
+    if (cachedTaskId) {
+      console.info("[intl/video] hit pending task cache", {
+        sourceVideoId: sourceVideoId || "",
+        taskId: cachedTaskId,
+      });
+      const cachedTaskVideoId = await waitForTwelveLabsTaskVideoId(
+        cachedTaskId,
+        TWELVELABS_TASK_POLL_WAIT_MS,
+      );
+      if (cachedTaskVideoId) {
+        videoId = cachedTaskVideoId;
+        deleteCachedTwelveLabsTask(urlCacheKey);
+        if (sourceCacheKey) deleteCachedTwelveLabsTask(sourceCacheKey);
+        writeCachedVideoId(urlCacheKey, videoId);
+        if (sourceCacheKey) writeCachedVideoId(sourceCacheKey, videoId);
+      } else {
+        throw fail(
+          language === "zh"
+            ? "视频正在解析中，请 5-15 秒后重试同一问题。"
+            : "Video is still processing. Please retry the same question in 5-15 seconds.",
+          503,
+        );
       }
-      if (["failed", "error"].includes((status.status || "").toLowerCase())) {
-        throw fail(`TwelveLabs task failed: ${JSON.stringify(status.error || "unknown")}`, 502);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1200));
     }
-    if (!videoId) throw fail("TwelveLabs task timeout", 504);
 
-    writeCachedVideoId(urlCacheKey, videoId);
-    if (sourceCacheKey) writeCachedVideoId(sourceCacheKey, videoId);
+    if (!videoId) {
+      const indexId = await ensureTwelveLabsIndex();
+      const videoRes = await fetch(videoUrl);
+      if (!videoRes.ok) throw fail(`Failed to fetch video (HTTP ${videoRes.status})`, 400);
+      const mimeType = (videoRes.headers.get("content-type") || "video/mp4").split(";")[0];
+      const bytes = Buffer.from(await videoRes.arrayBuffer());
+
+      const formData = new FormData();
+      formData.append("index_id", indexId);
+      formData.append("video_file", new Blob([bytes], { type: mimeType }), `video-${Date.now()}.mp4`);
+      formData.append("enable_video_stream", "false");
+
+      const task = await twelvelabsJson<{ _id?: string }>("/tasks", { method: "POST", body: formData });
+      if (!task._id) throw fail("TwelveLabs create task failed", 502);
+
+      writeCachedTwelveLabsTask(urlCacheKey, task._id);
+      if (sourceCacheKey) writeCachedTwelveLabsTask(sourceCacheKey, task._id);
+
+      const readyVideoId = await waitForTwelveLabsTaskVideoId(task._id, TWELVELABS_TASK_POLL_WAIT_MS);
+      if (!readyVideoId) {
+        throw fail(
+          language === "zh"
+            ? "视频正在解析中，请 5-15 秒后重试同一问题。"
+            : "Video is still processing. Please retry the same question in 5-15 seconds.",
+          503,
+        );
+      }
+      videoId = readyVideoId;
+      deleteCachedTwelveLabsTask(urlCacheKey);
+      if (sourceCacheKey) deleteCachedTwelveLabsTask(sourceCacheKey);
+      writeCachedVideoId(urlCacheKey, videoId);
+      if (sourceCacheKey) writeCachedVideoId(sourceCacheKey, videoId);
+    }
   }
 
   const analysisCacheKey = createAnalysisCacheKey(videoId, prompt, language);
@@ -1513,13 +1692,30 @@ export async function POST(req: Request) {
       const videoUrl = resolveMediaUrl(currentVideoId, mediaUrlMap);
       if (!videoUrl) throw fail("Unable to resolve video URL", 400);
       const latest = mergedMessages[mergedMessages.length - 1];
-      videoQuestionForStyle = latest.content || "";
-      const prompt = buildVideoQaPrompt(
-        latest.content || (effectiveLanguage === "zh" ? "请总结这个视频的主要内容。" : "Please summarize this video."),
+      const userQuestion =
+        latest.content || (effectiveLanguage === "zh" ? "请总结这个视频的主要内容。" : "Please summarize this video.");
+      videoQuestionForStyle = userQuestion;
+
+      const videoSummaryQuestion = buildVideoSummaryQuestion(effectiveLanguage);
+      const summaryPrompt = buildVideoQaPrompt(videoSummaryQuestion, effectiveLanguage);
+      const videoRawSummary = await analyzeVideo(videoUrl, summaryPrompt, effectiveLanguage, currentVideoId, false);
+      const videoSummary = await normalizeVideoAnalysisOutput(
+        videoRawSummary,
+        effectiveLanguage,
+        videoSummaryQuestion,
+      );
+      console.info("[intl/video] summary->mistral", {
+        language: effectiveLanguage,
+        summaryLength: videoSummary.length,
+        questionLength: userQuestion.length,
+        source: "new-upload",
+      });
+      const videoQaPrompt = buildVideoSummaryQaPrompt(userQuestion, videoSummary, effectiveLanguage);
+      outputText = await requestMistral(
+        INTERNATIONAL_GENERAL_MODEL_ID,
+        [{ role: "user", content: videoQaPrompt }],
         effectiveLanguage,
       );
-      outputText = await analyzeVideo(videoUrl, prompt, effectiveLanguage, currentVideoId, true);
-      outputText = await normalizeVideoAnalysisOutput(outputText, effectiveLanguage, latest.content || "");
     } else if (modelName === TWELVELABS_MODEL_ID) {
       let latestVideoId = findLatestMediaId(mergedMessages, "videos");
       if (!latestVideoId && chatId && userId) {
@@ -1536,13 +1732,30 @@ export async function POST(req: Request) {
       const videoUrl = resolveMediaUrl(latestVideoId, mediaUrlMap);
       if (!videoUrl) throw fail("Unable to resolve video URL", 400);
       const latest = mergedMessages[mergedMessages.length - 1];
-      videoQuestionForStyle = latest.content || "";
-      const prompt = buildVideoQaPrompt(
-        latest.content || (effectiveLanguage === "zh" ? "请继续分析这个视频并补充细节。" : "Please continue analyzing this video and add more detail."),
+      const userQuestion =
+        latest.content || (effectiveLanguage === "zh" ? "请继续分析这个视频并补充细节。" : "Please continue analyzing this video and add more detail.");
+      videoQuestionForStyle = userQuestion;
+
+      const videoSummaryQuestion = buildVideoSummaryQuestion(effectiveLanguage);
+      const summaryPrompt = buildVideoQaPrompt(videoSummaryQuestion, effectiveLanguage);
+      const videoRawSummary = await analyzeVideo(videoUrl, summaryPrompt, effectiveLanguage, latestVideoId, false);
+      const videoSummary = await normalizeVideoAnalysisOutput(
+        videoRawSummary,
+        effectiveLanguage,
+        videoSummaryQuestion,
+      );
+      console.info("[intl/video] summary->mistral", {
+        language: effectiveLanguage,
+        summaryLength: videoSummary.length,
+        questionLength: userQuestion.length,
+        source: "history-video",
+      });
+      const videoQaPrompt = buildVideoSummaryQaPrompt(userQuestion, videoSummary, effectiveLanguage);
+      outputText = await requestMistral(
+        INTERNATIONAL_GENERAL_MODEL_ID,
+        [{ role: "user", content: videoQaPrompt }],
         effectiveLanguage,
       );
-      outputText = await analyzeVideo(videoUrl, prompt, effectiveLanguage, latestVideoId, false);
-      outputText = await normalizeVideoAnalysisOutput(outputText, effectiveLanguage, latest.content || "");
     } else {
       outputText = await requestMistral(modelName, mergedMessages, effectiveLanguage);
     }
@@ -1582,12 +1795,20 @@ export async function POST(req: Request) {
     return toSse(outputText);
   } catch (error) {
     const statusCode = typeof (error as ErrorWithStatus)?.statusCode === "number" ? (error as ErrorWithStatus).statusCode! : 500;
+    const message = error instanceof Error ? error.message : "Unknown error";
+    const isVideoStillProcessingMessage =
+      statusCode === 503 &&
+      (message.includes("视频正在解析中") || message.includes("Video is still processing"));
+
     console.error("[intl/stream] request failed", {
       ...debugContext,
       statusCode,
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
       stack: error instanceof Error ? error.stack : undefined,
     });
-    return new Response(JSON.stringify({ success: false, error: error instanceof Error ? error.message : "Unknown error" }), { status: statusCode, headers: { "Content-Type": "application/json" } });
+    if (isVideoStillProcessingMessage) {
+      return toSse(message);
+    }
+    return new Response(JSON.stringify({ success: false, error: message }), { status: statusCode, headers: { "Content-Type": "application/json" } });
   }
 }
