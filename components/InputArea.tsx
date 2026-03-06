@@ -650,6 +650,7 @@ const InputArea = React.memo(function InputArea({
     setFeatureInDevMessage(message);
     setTimeout(() => setFeatureInDevMessage(""), 4000);
   }, [selectedLanguage]);
+  void showFeatureInDevelopment;
 
   // 辅助函数：直接调用 handleFileUpload（最可靠的方法）
   const triggerFileUpload = React.useCallback((file: File) => {
@@ -707,7 +708,7 @@ const InputArea = React.memo(function InputArea({
       }
 
       // 创建 File 对象并复用文件上传逻辑
-      const mimeType = media.type === "image" ? "image/jpeg" : "video/webm";
+      const mimeType = media.blob.type || (media.type === "image" ? "image/jpeg" : "video/webm");
       const file = new File([media.blob], media.name, { type: mimeType });
       console.log("[handleMediaCaptured] File created:", file.name, file.type, file.size);
       triggerFileUpload(file);
@@ -1810,7 +1811,6 @@ const InputArea = React.memo(function InputArea({
           stopCamera={stopCamera}
           formatRecordingTime={formatRecordingTime}
           onMediaCaptured={handleMediaCaptured}
-          onFeatureInDev={showFeatureInDevelopment}
           selectedLanguage={selectedLanguage}
         />
 
@@ -1821,7 +1821,6 @@ const InputArea = React.memo(function InputArea({
             const file = new File([result.blob], result.name, { type: result.blob.type });
             triggerFileUpload(file);
           }}
-          onFeatureInDev={showFeatureInDevelopment}
           selectedLanguage={selectedLanguage}
         />
 

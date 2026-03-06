@@ -1,7 +1,6 @@
 import React, { useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { CapturedMedia } from "@/hooks/useCamera";
-import { IS_DOMESTIC_VERSION } from "@/config";
 
 interface CameraPanelProps {
   isCameraActive: boolean;
@@ -18,7 +17,6 @@ interface CameraPanelProps {
   stopCamera: () => void;
   formatRecordingTime: (time: number) => string;
   onMediaCaptured?: (media: CapturedMedia) => void;
-  onFeatureInDev?: () => void;
   selectedLanguage?: string;
 }
 
@@ -37,17 +35,14 @@ export function CameraPanel({
   stopCamera,
   formatRecordingTime,
   onMediaCaptured,
-  onFeatureInDev,
   selectedLanguage = "zh",
 }: CameraPanelProps) {
-  // 本地预览状态
   const [previewMedia, setPreviewMedia] = useState<CapturedMedia | null>(null);
 
   if (!isCameraActive) return null;
 
   const isZh = selectedLanguage === "zh";
 
-  // 拍照 - 保存到预览状态
   const handleCapturePhoto = async () => {
     const media = await capturePhoto();
     if (media) {
@@ -55,7 +50,6 @@ export function CameraPanel({
     }
   };
 
-  // 录像 - 停止后保存到预览状态
   const handleToggleVideoRecording = async () => {
     const media = await toggleVideoRecording();
     if (media) {
@@ -63,68 +57,57 @@ export function CameraPanel({
     }
   };
 
-  // 确认上传
   const handleConfirm = () => {
-    if (!previewMedia) return;
+    if (!previewMedia || !onMediaCaptured) return;
 
-    // 国际版：拦截并提示功能开发中
-    if (!IS_DOMESTIC_VERSION) {
-      onFeatureInDev?.();
-      return;
-    }
-
-    if (onMediaCaptured) {
-      onMediaCaptured(previewMedia);
-      setPreviewMedia(null);
-      stopCamera();
-    }
+    onMediaCaptured(previewMedia);
+    setPreviewMedia(null);
+    stopCamera();
   };
 
-  // 重新拍摄
   const handleRetake = () => {
     setPreviewMedia(null);
   };
 
-  // 关闭相机
   const handleClose = () => {
     setPreviewMedia(null);
     stopCamera();
   };
 
   return (
-    <div className="mt-2 p-4 bg-gray-50 dark:bg-[#565869] border border-gray-200 dark:border-[#565869] rounded-md">
+    <div className="mt-2 rounded-md border border-gray-200 bg-gray-50 p-4 dark:border-[#565869] dark:bg-[#565869]">
       <div className="space-y-3">
-        {/* 预览模式 */}
         {previewMedia ? (
           <>
-            {/* 预览区域 */}
-            <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
+            <div className="relative aspect-video overflow-hidden rounded-lg bg-black">
               {previewMedia.type === "image" ? (
                 <img
                   src={previewMedia.data}
                   alt="Preview"
-                  className="w-full h-full object-cover"
+                  className="h-full w-full object-cover"
                 />
               ) : (
                 <video
                   key={previewMedia.data}
                   src={previewMedia.data}
-                  className="w-full h-full object-cover"
+                  className="h-full w-full object-cover"
                   controls
                   autoPlay
                   playsInline
                   preload="auto"
                 />
               )}
-              {/* 预览标签 */}
-              <div className="absolute top-2 right-2 bg-black/50 text-white px-2 py-1 rounded text-xs">
+              <div className="absolute right-2 top-2 rounded bg-black/50 px-2 py-1 text-xs text-white">
                 {previewMedia.type === "image"
-                  ? (isZh ? "📷 照片预览" : "📷 Photo Preview")
-                  : (isZh ? "🎥 视频预览" : "🎥 Video Preview")}
+                  ? isZh
+                    ? "📷 照片预览"
+                    : "📷 Photo Preview"
+                  : isZh
+                    ? "🎬 视频预览"
+                    : "🎬 Video Preview"}
               </div>
             </div>
 
-            {/* 预览操作按钮 */}
             <div className="flex items-center justify-center space-x-4">
               <Button
                 size="sm"
@@ -137,7 +120,7 @@ export function CameraPanel({
               <Button
                 size="sm"
                 onClick={handleConfirm}
-                className="bg-green-600 hover:bg-green-700 text-white"
+                className="bg-green-600 text-white hover:bg-green-700"
               >
                 {isZh ? "立即上传" : "Upload Now"}
               </Button>
@@ -153,8 +136,7 @@ export function CameraPanel({
           </>
         ) : (
           <>
-            {/* 相机实时预览 */}
-            <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
+            <div className="relative aspect-video overflow-hidden rounded-lg bg-black">
               {cameraStream && (
                 <video
                   ref={(video) => {
@@ -163,48 +145,47 @@ export function CameraPanel({
                       video.play().catch(() => {});
                     }
                   }}
-                  className="w-full h-full object-cover"
+                  className="h-full w-full object-cover"
                   autoPlay
                   muted
                   playsInline
                 />
               )}
 
-              {/* 录制指示器 */}
               {isVideoRecording && (
-                <div className="absolute top-2 left-2 flex items-center space-x-2 bg-red-600 text-white px-2 py-1 rounded text-xs">
-                  <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
+                <div className="absolute left-2 top-2 flex items-center space-x-2 rounded bg-red-600 px-2 py-1 text-xs text-white">
+                  <div className="h-2 w-2 animate-pulse rounded-full bg-white" />
                   <span>{formatRecordingTime(recordingTime)}</span>
                 </div>
               )}
 
-              {/* 转换进度指示器 */}
               {isConverting && (
-                <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center">
-                  <div className="text-white text-sm mb-2">
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70">
+                  <div className="mb-2 text-sm text-white">
                     {isZh ? "正在转换视频格式..." : "Converting video..."}
                   </div>
-                  <div className="w-48 h-2 bg-gray-700 rounded-full overflow-hidden">
+                  <div className="h-2 w-48 overflow-hidden rounded-full bg-gray-700">
                     <div
                       className="h-full bg-blue-500 transition-all duration-300"
                       style={{ width: `${convertProgress}%` }}
                     />
                   </div>
-                  <div className="text-white text-xs mt-1">{convertProgress}%</div>
+                  <div className="mt-1 text-xs text-white">{convertProgress}%</div>
                 </div>
               )}
 
-              {/* 模式指示器 */}
-              <div className="absolute top-2 right-2 bg-black/50 text-white px-2 py-1 rounded text-xs">
+              <div className="absolute right-2 top-2 rounded bg-black/50 px-2 py-1 text-xs text-white">
                 {cameraMode === "photo"
-                  ? (isZh ? "📷 拍照" : "📷 Photo")
-                  : (isZh ? "🎥 录像" : "🎥 Video")}
+                  ? isZh
+                    ? "📷 拍照"
+                    : "📷 Photo"
+                  : isZh
+                    ? "🎬 录像"
+                    : "🎬 Video"}
               </div>
             </div>
 
-            {/* 相机控制按钮 */}
             <div className="flex items-center justify-center space-x-4">
-              {/* 模式切换 */}
               <Button
                 size="sm"
                 variant="outline"
@@ -213,21 +194,28 @@ export function CameraPanel({
                 disabled={isVideoRecording}
               >
                 {cameraMode === "photo"
-                  ? (isZh ? "切换到录像" : "Switch to Video")
-                  : (isZh ? "切换到拍照" : "Switch to Photo")}
+                  ? isZh
+                    ? "切换到录像"
+                    : "Switch to Video"
+                  : isZh
+                    ? "切换到拍照"
+                    : "Switch to Photo"}
               </Button>
 
-              {/* 拍摄按钮 */}
               {cameraMode === "photo" ? (
                 <Button
                   size="sm"
                   onClick={handleCapturePhoto}
                   disabled={isCapturing}
-                  className="bg-blue-600 hover:bg-blue-700 text-white"
+                  className="bg-blue-600 text-white hover:bg-blue-700"
                 >
                   {isCapturing
-                    ? (isZh ? "拍摄中..." : "Capturing...")
-                    : (isZh ? "拍照" : "Take Photo")}
+                    ? isZh
+                      ? "拍摄中..."
+                      : "Capturing..."
+                    : isZh
+                      ? "拍照"
+                      : "Take Photo"}
                 </Button>
               ) : (
                 <Button
@@ -240,12 +228,15 @@ export function CameraPanel({
                   } text-white`}
                 >
                   {isVideoRecording
-                    ? (isZh ? "停止录制" : "Stop Recording")
-                    : (isZh ? "开始录制" : "Start Recording")}
+                    ? isZh
+                      ? "停止录制"
+                      : "Stop Recording"
+                    : isZh
+                      ? "开始录制"
+                      : "Start Recording"}
                 </Button>
               )}
 
-              {/* 关闭相机 */}
               <Button
                 size="sm"
                 variant="outline"

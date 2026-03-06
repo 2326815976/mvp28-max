@@ -1,7 +1,6 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Mic, Square } from "lucide-react";
-import { IS_DOMESTIC_VERSION } from "@/config";
 import { AudioPlayer } from "@/components/AudioPlayer";
 
 interface AudioRecordingResult {
@@ -14,7 +13,6 @@ interface AudioRecordingPanelProps {
   isActive: boolean;
   onClose: () => void;
   onUpload: (result: AudioRecordingResult) => void;
-  onFeatureInDev?: () => void;
   selectedLanguage?: string;
 }
 
@@ -22,7 +20,6 @@ export function AudioRecordingPanel({
   isActive,
   onClose,
   onUpload,
-  onFeatureInDev,
   selectedLanguage = "zh",
 }: AudioRecordingPanelProps) {
   const [isRecording, setIsRecording] = useState(false);
@@ -36,27 +33,24 @@ export function AudioRecordingPanel({
 
   const isZh = selectedLanguage === "zh";
 
-  // 清理资源
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current.getTracks().forEach((track) => track.stop());
       }
       if (previewAudio?.url) {
         URL.revokeObjectURL(previewAudio.url);
       }
     };
-  }, []);
+  }, [previewAudio]);
 
-  // 格式化录音时间
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   };
 
-  // 开始录音
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -87,7 +81,6 @@ export function AudioRecordingPanel({
     }
   };
 
-  // 停止录音并生成预览
   const stopRecording = () => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -110,9 +103,8 @@ export function AudioRecordingPanel({
       setPreviewAudio({ blob, url, name });
       setIsRecording(false);
 
-      // 停止麦克风
       if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
       }
     };
@@ -120,21 +112,13 @@ export function AudioRecordingPanel({
     mediaRecorderRef.current.stop();
   };
 
-  // 确认上传
   const handleConfirm = () => {
     if (!previewAudio) return;
-
-    // 国际版：拦截并提示功能开发中
-    if (!IS_DOMESTIC_VERSION) {
-      onFeatureInDev?.();
-      return;
-    }
 
     onUpload(previewAudio);
     handleClose();
   };
 
-  // 重新录制
   const handleRetake = () => {
     if (previewAudio?.url) {
       URL.revokeObjectURL(previewAudio.url);
@@ -143,11 +127,11 @@ export function AudioRecordingPanel({
     setRecordingTime(0);
   };
 
-  // 关闭面板
   const handleClose = () => {
     if (timerRef.current) clearInterval(timerRef.current);
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
     }
     if (previewAudio?.url) {
       URL.revokeObjectURL(previewAudio.url);
@@ -161,14 +145,12 @@ export function AudioRecordingPanel({
   if (!isActive) return null;
 
   return (
-    <div className="mt-2 p-4 bg-gray-50 dark:bg-[#565869] border border-gray-200 dark:border-[#565869] rounded-md">
+    <div className="mt-2 rounded-md border border-gray-200 bg-gray-50 p-4 dark:border-[#565869] dark:bg-[#565869]">
       <div className="space-y-3">
-        {/* 预览模式 */}
         {previewAudio ? (
           <>
-            {/* 音频预览区域 */}
-            <div className="relative bg-gray-100 dark:bg-[#40414f] rounded-lg p-4">
-              <div className="flex items-center justify-center mb-3">
+            <div className="relative rounded-lg bg-gray-100 p-4 dark:bg-[#40414f]">
+              <div className="mb-3 flex items-center justify-center">
                 <div className="text-xs text-gray-500 dark:text-gray-400">
                   {isZh ? "🎙️ 录音预览" : "🎙️ Audio Preview"}
                 </div>
@@ -179,7 +161,6 @@ export function AudioRecordingPanel({
               </div>
             </div>
 
-            {/* 预览操作按钮 */}
             <div className="flex items-center justify-center space-x-4">
               <Button
                 size="sm"
@@ -192,7 +173,7 @@ export function AudioRecordingPanel({
               <Button
                 size="sm"
                 onClick={handleConfirm}
-                className="bg-green-600 hover:bg-green-700 text-white"
+                className="bg-green-600 text-white hover:bg-green-700"
               >
                 {isZh ? "立即上传" : "Upload Now"}
               </Button>
@@ -208,56 +189,61 @@ export function AudioRecordingPanel({
           </>
         ) : (
           <>
-            {/* 录音界面 */}
-            <div className="relative bg-gray-100 dark:bg-[#40414f] rounded-lg p-6">
+            <div className="relative rounded-lg bg-gray-100 p-6 dark:bg-[#40414f]">
               <div className="flex flex-col items-center justify-center space-y-4">
-                {/* 录音状态指示 */}
-                <div className={`w-16 h-16 rounded-full flex items-center justify-center ${
-                  isRecording
-                    ? "bg-red-100 dark:bg-red-900/30"
-                    : "bg-gray-200 dark:bg-[#565869]"
-                }`}>
+                <div
+                  className={`flex h-16 w-16 items-center justify-center rounded-full ${
+                    isRecording
+                      ? "bg-red-100 dark:bg-red-900/30"
+                      : "bg-gray-200 dark:bg-[#565869]"
+                  }`}
+                >
                   {isRecording ? (
-                    <div className="w-4 h-4 bg-red-600 rounded-full animate-pulse" />
+                    <div className="h-4 w-4 animate-pulse rounded-full bg-red-600" />
                   ) : (
-                    <Mic className="w-8 h-8 text-gray-500 dark:text-gray-400" />
+                    <Mic className="h-8 w-8 text-gray-500 dark:text-gray-400" />
                   )}
                 </div>
 
-                {/* 录音时间 */}
-                <div className={`text-2xl font-mono ${
-                  isRecording ? "text-red-600 dark:text-red-400" : "text-gray-500 dark:text-gray-400"
-                }`}>
+                <div
+                  className={`text-2xl font-mono ${
+                    isRecording
+                      ? "text-red-600 dark:text-red-400"
+                      : "text-gray-500 dark:text-gray-400"
+                  }`}
+                >
                   {formatTime(recordingTime)}
                 </div>
 
-                {/* 状态文字 */}
                 <div className="text-xs text-gray-500 dark:text-gray-400">
                   {isRecording
-                    ? (isZh ? "正在录音..." : "Recording...")
-                    : (isZh ? "点击开始录音" : "Click to start recording")}
+                    ? isZh
+                      ? "正在录音..."
+                      : "Recording..."
+                    : isZh
+                      ? "点击开始录音"
+                      : "Click to start recording"}
                 </div>
               </div>
             </div>
 
-            {/* 录音控制按钮 */}
             <div className="flex items-center justify-center space-x-4">
               {isRecording ? (
                 <Button
                   size="sm"
                   onClick={stopRecording}
-                  className="bg-red-600 hover:bg-red-700 text-white"
+                  className="bg-red-600 text-white hover:bg-red-700"
                 >
-                  <Square className="w-4 h-4 mr-2" />
+                  <Square className="mr-2 h-4 w-4" />
                   {isZh ? "停止录音" : "Stop Recording"}
                 </Button>
               ) : (
                 <Button
                   size="sm"
                   onClick={startRecording}
-                  className="bg-blue-600 hover:bg-blue-700 text-white"
+                  className="bg-blue-600 text-white hover:bg-blue-700"
                 >
-                  <Mic className="w-4 h-4 mr-2" />
+                  <Mic className="mr-2 h-4 w-4" />
                   {isZh ? "开始录音" : "Start Recording"}
                 </Button>
               )}
