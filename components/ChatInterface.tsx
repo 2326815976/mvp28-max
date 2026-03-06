@@ -306,7 +306,8 @@ function ChatInterface({
     const unique = Array.from(new Set(pending));
     unique.forEach((id) => resolvingIdsRef.current.add(id));
 
-    fetch("/api/domestic/media/resolve", {
+    const apiPrefix = isDomesticVersion ? "domestic" : "international";
+    fetch(`/api/${apiPrefix}/media/resolve`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
@@ -321,7 +322,7 @@ function ChatInterface({
       .finally(() => {
         unique.forEach((id) => resolvingIdsRef.current.delete(id));
       });
-  }, [messages, mediaPreviewMap]);
+  }, [messages, mediaPreviewMap, isDomesticVersion]);
 
   // Normalize common AI 输出的"[\\vec{F} = m \\vec{a}]"或"\\[ ... \\]"为 math 块，仅在原文完全没有 $ 时执行，避免重复渲染
   const normalizeMathContent = (text: string) => {
@@ -685,7 +686,7 @@ function ChatInterface({
                                     key={`${src}-${idx}`}
                                     controls
                                     src={src}
-                                    className="h-44 rounded-lg border border-gray-200 dark:border-[#4a4c5c] bg-black"
+                                    className="w-full max-w-[300px] sm:max-w-[420px] max-h-56 rounded-lg border border-gray-200 dark:border-[#4a4c5c] bg-black object-contain"
                                   >
                                     {getLocalizedText("videoNotSupported") || "Video not supported"}
                                   </video>

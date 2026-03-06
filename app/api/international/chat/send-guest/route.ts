@@ -1,86 +1,83 @@
 import { NextResponse } from "next/server";
+import { POST as streamPost } from "../stream-guest/route";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions";
+async function readSseTextFromResponse(response: Response) {
+  if (!response.body) return "";
 
-const getMistralProvider = (modelId: string) => {
-  const apiKey = process.env.MISTRAL_API_KEY;
-  if (!apiKey || !modelId) return null;
-  return {
-    model: modelId,
-    url: MISTRAL_URL,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-  };
-};
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let output = "";
 
-const extractFullText = (data: any): string => {
-  const choice = data?.choices?.[0];
-  if (!choice) return "";
-  const content = choice.message?.content;
-  if (Array.isArray(content)) {
-    return content.map((c: any) => c?.text ?? c ?? "").join("");
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      try {
+        const parsed = JSON.parse(data);
+        if (typeof parsed?.chunk === "string") {
+          output += parsed.chunk;
+        }
+      } catch {
+        // ignore malformed chunk
+      }
+    }
   }
-  return content || "";
-};
+
+  return output.trim();
+}
 
 export async function POST(req: Request) {
   try {
-    const { model, modelId, message, messages = [], language } = await req.json();
-    const modelName = model || modelId || "codestral-latest";
-    const provider = getMistralProvider(modelName);
+    const streamResponse = await streamPost(req);
+    const contentType = streamResponse.headers.get("content-type") || "";
 
-    if (!provider) {
-      return NextResponse.json(
-        { success: false, error: "Missing MISTRAL_API_KEY or model id" },
-        { status: 400 }
-      );
+    if (!streamResponse.ok) {
+      const raw = await streamResponse.text();
+      try {
+        const parsed = JSON.parse(raw);
+        return NextResponse.json(parsed, { status: streamResponse.status });
+      } catch {
+        return NextResponse.json(
+          { success: false, error: raw || "Request failed" },
+          { status: streamResponse.status },
+        );
+      }
     }
 
-    const finalMessages =
-      Array.isArray(messages) && messages.length > 0
-        ? messages
-        : [{ role: "user", content: message }];
-
-    const upstream = await fetch(provider.url, {
-      method: "POST",
-      headers: {
-        ...provider.headers,
-        ...(language === "zh"
-          ? { "Accept-Language": "zh-CN,zh;q=0.9" }
-          : { "Accept-Language": "en-US,en;q=0.9" }),
-      },
-      body: JSON.stringify({
-        model: provider.model,
-        messages: finalMessages,
-        stream: false,
-        temperature: 0.7,
-      }),
-    });
-
-    if (!upstream.ok) {
-      const errText = await upstream.text();
-      return NextResponse.json(
-        { success: false, error: errText || "Upstream error" },
-        { status: upstream.status }
-      );
+    if (!contentType.includes("text/event-stream")) {
+      const raw = await streamResponse.text();
+      try {
+        const parsed = JSON.parse(raw);
+        return NextResponse.json(parsed, { status: 200 });
+      } catch {
+        return NextResponse.json({
+          success: true,
+          data: { response: raw, chatId: Date.now().toString() },
+        });
+      }
     }
 
-    const data = await upstream.json();
-    const content = extractFullText(data);
-
+    const text = await readSseTextFromResponse(streamResponse);
     return NextResponse.json({
       success: true,
-      data: { response: content, chatId: Date.now().toString() },
+      data: { response: text, chatId: Date.now().toString() },
     });
   } catch (error) {
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : "Unknown error" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

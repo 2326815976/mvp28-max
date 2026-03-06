@@ -706,31 +706,20 @@ const InputArea = React.memo(function InputArea({
         return;
       }
 
-      // 国际版：显示功能开发中提示
-      if (!IS_DOMESTIC_VERSION) {
-        console.log("[handleMediaCaptured] International version, feature in development");
-        showFeatureInDevelopment();
-        return;
-      }
-
       // 创建 File 对象并复用文件上传逻辑
       const mimeType = media.type === "image" ? "image/jpeg" : "video/webm";
       const file = new File([media.blob], media.name, { type: mimeType });
       console.log("[handleMediaCaptured] File created:", file.name, file.type, file.size);
       triggerFileUpload(file);
     },
-    [showFeatureInDevelopment, triggerFileUpload]
+    [triggerFileUpload]
   );
 
   const allowedTypesHint =
     selectedLanguage === "zh"
       ? "支持：图片、视频、音频（不可混合类型上传）"
       : "Allowed: image, video, or audio only (single type at a time)";
-  const fileUploadDisabledReason = !IS_DOMESTIC_VERSION
-    ? selectedLanguage === "zh"
-      ? "国际版暂未接入多模态模型，文件上传已禁用"
-      : "File upload is disabled on the international build (multimodal not yet supported)."
-    : null;
+  const fileUploadDisabledReason = null;
 
   const attachmentButtonTitle = React.useMemo(() => {
     if (fileUploadDisabledReason) return fileUploadDisabledReason;
@@ -812,7 +801,9 @@ const InputArea = React.memo(function InputArea({
   const hideMornGPTModels = IS_DOMESTIC_VERSION && isMobile;
 
   // 独立的模型选择 Tab 状态（仅用于弹窗切换，不影响当前已选模型）
-  const [modelSelectorTab, setModelSelectorTab] = React.useState(selectedModelType);
+  const [modelSelectorTab, setModelSelectorTab] = React.useState(
+    selectedModelType === "advanced_multimodal" ? "external" : selectedModelType
+  );
 
   // 国内版移动端访客模式：禁用外部模型选择
   const isGuestMode = IS_DOMESTIC_VERSION && isMobile && !appUser;
@@ -820,7 +811,9 @@ const InputArea = React.memo(function InputArea({
   // 弹窗打开时同步当前模型到本地 Tab，避免误切换
   React.useEffect(() => {
     if (isModelSelectorOpen) {
-      setModelSelectorTab(selectedModelType);
+      setModelSelectorTab(
+        selectedModelType === "advanced_multimodal" ? "external" : selectedModelType
+      );
     }
   }, [isModelSelectorOpen, selectedModelType]);
   
@@ -843,10 +836,35 @@ const InputArea = React.memo(function InputArea({
     ? filteredExternalModels.filter((model) => model.modality !== "multimodal")
     : [];
 
+  const internationalMultimodalModels = !isDomesticVersion
+    ? filteredExternalModels.filter((model) => model.modality === "multimodal")
+    : [];
+
+  const internationalTextModels = !isDomesticVersion
+    ? filteredExternalModels.filter((model) => model.modality !== "multimodal")
+    : [];
+
+  const internationalImageModels = internationalMultimodalModels.filter(
+    (model) => model.supportsImage === true
+  );
+
+  const internationalVideoModels = internationalMultimodalModels.filter(
+    (model) => model.supportsVideo === true
+  );
+
+  const internationalAudioModels = internationalMultimodalModels.filter(
+    (model) => model.supportsAudio === true
+  );
+
   // 获取外部模型图标
   const getExternalModelIcon = (model: any) => {
-    // 多模态模型使用图像图标
     if (model.modality === "multimodal") {
+      if (model.supportsVideo === true) {
+        return <Video className="w-3 h-3" />;
+      }
+      if (model.supportsAudio === true) {
+        return <Mic className="w-3 h-3" />;
+      }
       return <Image className="w-3 h-3" />;
     }
     // 代码模型
@@ -866,6 +884,10 @@ const InputArea = React.memo(function InputArea({
         return <Cpu className="w-3 h-3" />;
       case "mistral":
         return <Wind className="w-3 h-3" />;
+      case "gemini":
+        return <Sparkles className="w-3 h-3" />;
+      case "twelvelabs":
+        return <Video className="w-3 h-3" />;
       default:
         return <Bot className="w-3 h-3" />;
     }
@@ -874,6 +896,12 @@ const InputArea = React.memo(function InputArea({
   // 获取外部模型图标背景色
   const getExternalModelIconColor = (model: any) => {
     if (model.modality === "multimodal") {
+      if (model.supportsVideo === true) {
+        return "bg-red-500";
+      }
+      if (model.supportsAudio === true) {
+        return "bg-teal-500";
+      }
       return "bg-purple-500";
     }
     if (model.id.toLowerCase().includes("coder") || model.id.toLowerCase().includes("codestral")) {
@@ -891,6 +919,10 @@ const InputArea = React.memo(function InputArea({
         return "bg-orange-500";
       case "mistral":
         return "bg-teal-500";
+      case "gemini":
+        return "bg-fuchsia-500";
+      case "twelvelabs":
+        return "bg-red-500";
       default:
         return "bg-gray-500";
     }
@@ -951,7 +983,7 @@ const InputArea = React.memo(function InputArea({
         className="hidden"
         id="file-upload"
         accept={["image/*", "video/*", "audio/*"].join(",")}
-        disabled={isUploading || !IS_DOMESTIC_VERSION || !appUser}
+        disabled={isUploading || !appUser}
       />
 
       <div className="max-w-4xl mx-auto px-4">
@@ -1054,10 +1086,9 @@ const InputArea = React.memo(function InputArea({
                   className={`h-9 w-9 p-0 sm:w-auto sm:px-3 justify-center sm:justify-start gap-0 sm:gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${isUploading ? "animate-pulse" : ""}`}
                   title={attachmentButtonTitle}
                   type="button"
-                  disabled={isUploading || !IS_DOMESTIC_VERSION || !appUser}
+                  disabled={isUploading || !appUser}
                   onClick={() => {
                     if (!appUser) return;
-                    if (!IS_DOMESTIC_VERSION) return;
                     if (uploadedFiles.length >= MAX_FILES) {
                       setUploadError(
                         `Maximum ${MAX_FILES} files reached. Please remove some files first.`
@@ -1660,7 +1691,27 @@ const InputArea = React.memo(function InputArea({
                             {domesticTextModels.map(renderExternalModelButton)}
                           </>
                         ) : (
-                          filteredExternalModels.map(renderExternalModelButton)
+                          <>
+                            <div className="text-[10px] font-semibold text-gray-600 dark:text-gray-300 mt-1">
+                              {selectedLanguage === "zh" ? "图片理解模型" : "Image Understanding Models"}
+                            </div>
+                            {internationalImageModels.map(renderExternalModelButton)}
+
+                            <div className="text-[10px] font-semibold text-gray-600 dark:text-gray-300 mt-2">
+                              {selectedLanguage === "zh" ? "视频理解模型" : "Video Understanding Models"}
+                            </div>
+                            {internationalVideoModels.map(renderExternalModelButton)}
+
+                            <div className="text-[10px] font-semibold text-gray-600 dark:text-gray-300 mt-2">
+                              {selectedLanguage === "zh" ? "音频理解模型" : "Audio Understanding Models"}
+                            </div>
+                            {internationalAudioModels.map(renderExternalModelButton)}
+
+                            <div className="text-[10px] font-semibold text-gray-600 dark:text-gray-300 mt-2">
+                              {selectedLanguage === "zh" ? "文本模型" : "Text Models"}
+                            </div>
+                            {internationalTextModels.map(renderExternalModelButton)}
+                          </>
                         )}
                       </div>
                     </TabsContent>

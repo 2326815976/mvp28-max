@@ -6,12 +6,16 @@ import { GENERAL_MODEL_ID } from "@/utils/model-limits";
 
 export const useChatState = () => {
   const currentModelConfig = getCurrentModelConfig();
-  // Prefer a multimodal model when available; fall back to config default
+  // Domestic prefers multimodal by default, international prefers text model.
   const pickDefaultModel = () => {
     const targetCategory = DEFAULT_LANGUAGE === "en" ? "international" : "domestic";
     const candidates = externalModels.filter((m) => m.category === targetCategory);
-    const multi = candidates.find((m) => m.modality === "multimodal");
-    return multi?.id || candidates[0]?.id || currentModelConfig.defaultModel;
+    if (targetCategory === "domestic") {
+      const multi = candidates.find((m) => m.modality === "multimodal");
+      return multi?.id || candidates[0]?.id || currentModelConfig.defaultModel;
+    }
+    const text = candidates.find((m) => m.modality !== "multimodal");
+    return text?.id || candidates[0]?.id || currentModelConfig.defaultModel;
   };
   const defaultModelId = GENERAL_MODEL_ID;
   const [messages, setMessages] = useState<Message[]>([]);

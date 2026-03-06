@@ -160,7 +160,7 @@ export async function GET(
 
     const { data, error } = await supabase
       .from("messages")
-      .select("id, role, content, created_at")
+      .select("id, role, content, created_at, image_file_ids, video_file_ids, audio_file_ids")
       .eq("conversation_id", conversationId)
       .order("created_at", { ascending: true });
 
@@ -169,7 +169,21 @@ export async function GET(
       return new Response("Failed to list messages", { status: 500 });
     }
 
-    return Response.json(data ?? []);
+    const list = (data || []).map((m: any) => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      created_at: m.created_at,
+      imageFileIds: Array.isArray(m.image_file_ids) ? m.image_file_ids : [],
+      videoFileIds: Array.isArray(m.video_file_ids) ? m.video_file_ids : [],
+      audioFileIds: Array.isArray(m.audio_file_ids) ? m.audio_file_ids : [],
+      // 兼容前端旧字段读取
+      images: Array.isArray(m.image_file_ids) ? m.image_file_ids : [],
+      videos: Array.isArray(m.video_file_ids) ? m.video_file_ids : [],
+      audios: Array.isArray(m.audio_file_ids) ? m.audio_file_ids : [],
+    }));
+
+    return Response.json(list);
   }
 
   // domestic -> CloudBase
@@ -296,7 +310,6 @@ export async function POST(
 
     const plan = getPlanInfo(userMeta);
     const effectivePlanLower = plan.planLower || "free";
-    const isBasicUser = effectivePlanLower === "basic";
 
     // Enforce daily quota on user messages (只校验，不扣减)
     // 注意：只有外部模型才扣除 daily external quota，MornGPT 专家模型不扣除
@@ -368,49 +381,57 @@ export async function POST(
       }
 
       // 注意：此处只做“校验”，不做“扣减”。实际扣减在 AI 成功输出后由 /chat/stream 执行，避免无响应误扣。
+    }
 
-      // Basic 高级多模态媒体配额检查（国际版）- 使用 user_wallets
-      if (isBasicUser) {
-        const currentModelId = modelId || "qwen3-omni-flash";
-        const modelCategory = getModelCategory(currentModelId);
-        const hasMedia =
-          (mediaPayload.images?.length || 0) > 0 ||
-          (mediaPayload.videos?.length || 0) > 0 ||
-          (mediaPayload.audios?.length || 0) > 0;
-        if (modelCategory === "advanced_multimodal" && hasMedia) {
-          const imageCount = getImageCount(mediaPayload);
-          const videoAudioCount = getVideoAudioCount(mediaPayload);
+    // 国际版高级多模态额度预检查（按模型类型计费单位）
+    if (role === "user" && isAdvancedMultimodalModel(currentModelId)) {
+      const modelIdLower = currentModelId.toLowerCase();
+      const requestImageCount = getImageCount(mediaPayload);
+      const requestVideoAudioCount = getVideoAudioCount(mediaPayload);
+      const quotaImageCount = modelIdLower === "gemma-3-4b-it" ? Math.max(1, requestImageCount) : requestImageCount;
+      const quotaVideoAudioCount =
+        modelIdLower === "voxtral-mini-latest" || modelIdLower === "twelvelabs-pegasus-1.2"
+          ? Math.max(1, requestVideoAudioCount)
+          : requestVideoAudioCount;
 
-          // 从已查询的 walletRow 获取月度余额
-          const monthlyImageBalance = walletRow?.monthly_image_balance ?? 0;
-          const monthlyVideoBalance = walletRow?.monthly_video_balance ?? 0;
+      const { data: walletRow, error: walletErr } = await supabase
+        .from("user_wallets")
+        .select("monthly_image_balance, monthly_video_balance")
+        .eq("user_id", userId)
+        .single();
 
-          if (imageCount > 0 && monthlyImageBalance < imageCount) {
-            return new Response(
-              JSON.stringify({
-                error: getQuotaExceededMessage("monthly_photo", "en"),
-                quotaType: "monthly_photo",
-                remaining: Math.max(0, monthlyImageBalance),
-              }),
-              { status: 402, headers: { "Content-Type": "application/json" } },
-            );
-          }
-
-          if (videoAudioCount > 0 && monthlyVideoBalance < videoAudioCount) {
-            return new Response(
-              JSON.stringify({
-                error: getQuotaExceededMessage("monthly_video_audio", "en"),
-                quotaType: "monthly_video_audio",
-                remaining: Math.max(0, monthlyVideoBalance),
-              }),
-              { status: 402, headers: { "Content-Type": "application/json" } },
-            );
-          }
-
-          // 注意：此处只做“校验”，不做“扣减”。实际扣减在 AI 成功输出后由 /chat/stream 执行，避免无响应误扣。
-        }
+      if (walletErr && walletErr.code !== "PGRST116") {
+        console.error("Multimodal quota fetch error", walletErr);
+        return new Response("Failed to check quota", { status: 500 });
       }
 
+      // 若钱包记录尚未初始化，则放行；真实扣费仍在 /chat/stream 执行
+      if (walletRow) {
+        const monthlyImageBalance = walletRow.monthly_image_balance ?? 0;
+        const monthlyVideoBalance = walletRow.monthly_video_balance ?? 0;
+
+        if (quotaImageCount > 0 && monthlyImageBalance < quotaImageCount) {
+          return new Response(
+            JSON.stringify({
+              error: getQuotaExceededMessage("monthly_photo", "en"),
+              quotaType: "monthly_photo",
+              remaining: Math.max(0, monthlyImageBalance),
+            }),
+            { status: 402, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (quotaVideoAudioCount > 0 && monthlyVideoBalance < quotaVideoAudioCount) {
+          return new Response(
+            JSON.stringify({
+              error: getQuotaExceededMessage("monthly_video_audio", "en"),
+              quotaType: "monthly_video_audio",
+              remaining: Math.max(0, monthlyVideoBalance),
+            }),
+            { status: 402, headers: { "Content-Type": "application/json" } },
+          );
+        }
+      }
     }
 
     // Free 用户或本地会话不落库消息
@@ -422,7 +443,7 @@ export async function POST(
     if (normalizedClientId) {
       const { data: existing, error: existingErr } = await supabase
         .from("messages")
-        .select("id, content")
+        .select("id, content, image_file_ids, video_file_ids, audio_file_ids")
         .eq("conversation_id", conversationId)
         .eq("user_id", userId)
         .eq("client_id", normalizedClientId)
@@ -433,11 +454,25 @@ export async function POST(
       } else if (existing) {
         const existingContent = typeof existing.content === "string" ? existing.content : "";
         const nextContent = typeof content === "string" ? content : "";
-        const shouldUpdate = nextContent.length > existingContent.length;
-        if (shouldUpdate) {
+        const existingImages = Array.isArray((existing as any).image_file_ids) ? (existing as any).image_file_ids : [];
+        const existingVideos = Array.isArray((existing as any).video_file_ids) ? (existing as any).video_file_ids : [];
+        const existingAudios = Array.isArray((existing as any).audio_file_ids) ? (existing as any).audio_file_ids : [];
+        const shouldUpdateContent = nextContent.length > existingContent.length;
+        const shouldUpdateMedia =
+          JSON.stringify(existingImages) !== JSON.stringify(mediaPayload.images) ||
+          JSON.stringify(existingVideos) !== JSON.stringify(mediaPayload.videos) ||
+          JSON.stringify(existingAudios) !== JSON.stringify(mediaPayload.audios);
+
+        if (shouldUpdateContent || shouldUpdateMedia) {
           const { error: updateErr } = await supabase
             .from("messages")
-            .update({ content, tokens: tokens || null })
+            .update({
+              content: shouldUpdateContent ? content : existingContent,
+              tokens: tokens || null,
+              image_file_ids: mediaPayload.images,
+              video_file_ids: mediaPayload.videos,
+              audio_file_ids: mediaPayload.audios,
+            })
             .eq("id", existing.id)
             .eq("conversation_id", conversationId)
             .eq("user_id", userId);
@@ -463,6 +498,9 @@ export async function POST(
       content,
       client_id: normalizedClientId,
       tokens: tokens || null,
+      image_file_ids: mediaPayload.images,
+      video_file_ids: mediaPayload.videos,
+      audio_file_ids: mediaPayload.audios,
     });
     if (error) {
       console.error("Insert message error", error);

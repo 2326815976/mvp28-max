@@ -163,6 +163,9 @@ export interface ExternalModel {
   description: string;
   category: string;
   modality?: "multimodal" | "text";
+  supportsImage?: boolean;
+  supportsVideo?: boolean;
+  supportsAudio?: boolean;
   type: "free" | "premium" | "popular" | "paid";
   price: string;
 }

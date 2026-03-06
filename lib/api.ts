@@ -250,15 +250,29 @@ class ApiService {
 
           // Provide friendlier, status-aware messages for UI
           const isZh = language === "zh";
+          const normalizedServerMessage = String(serverMessage || "");
+          const isFreeTierOnly =
+            /allocationquota\.freetieronly/i.test(errorCode) ||
+            /free tier.*exhaust/i.test(normalizedServerMessage) ||
+            /仅免费额度/.test(normalizedServerMessage) ||
+            /免费额度已用完/.test(normalizedServerMessage);
           const isCapacity =
-            /capacity/i.test(serverMessage) ||
+            /capacity/i.test(normalizedServerMessage) ||
             /3505/.test(errorCode) ||
             /service_tier_capacity_exceeded/i.test(errorCode);
           const friendly =
-            response.status === 401 || response.status === 403
+            isFreeTierOnly
+              ? isZh
+                ? "模型免费额度已用完，请关闭“仅免费额度”模式或充值后重试。"
+                : "The model free tier is exhausted. Disable free-tier-only mode or top up and retry."
+              : response.status === 401 || (response.status === 403 && !!token)
               ? isZh
                 ? "登录已失效，请重新登录。"
                 : "Session expired — please sign in again."
+              : response.status === 403
+              ? isZh
+                ? "请求被上游模型服务拒绝，请检查模型权限或额度。"
+                : "Request was rejected by upstream model service. Check permission or quota."
               : response.status === 429
               ? isZh
                 ? "请求过快，请稍后再试。"

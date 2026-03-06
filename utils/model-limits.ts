@@ -10,15 +10,18 @@
 import { IS_DOMESTIC_VERSION } from "@/config";
 
 // 默认通用模型（前端展示为 General Model）：
-// - 国内版使用 Qwen-Turbo
+// - 国内版使用 Qwen3.5-Flash
 // - 国际版使用 Mistral-small-latest
-export const GENERAL_MODEL_ID = IS_DOMESTIC_VERSION ? "qwen-turbo" : "mistral-small-latest";
+export const GENERAL_MODEL_ID = IS_DOMESTIC_VERSION ? "qwen3.5-flash" : "mistral-small-latest";
+const LEGACY_DOMESTIC_GENERAL_MODEL_ID = "qwen-turbo";
 
 /**
  * 通用模型列表 (General/Internal Models)
  * 这些模型对 Free 用户无限制使用
  */
-export const GENERAL_MODELS = [GENERAL_MODEL_ID];
+export const GENERAL_MODELS = IS_DOMESTIC_VERSION
+  ? [GENERAL_MODEL_ID, LEGACY_DOMESTIC_GENERAL_MODEL_ID]
+  : [GENERAL_MODEL_ID];
 
 /**
  * 外部模型列表 (External Models)
@@ -37,7 +40,7 @@ export const EXTERNAL_MODELS = [
   "deepseek-v3.2-exp",
   "Moonshot-Kimi-K2-Instruct",
   "glm-4.6",
-  // 国际版模型 (Mistral)
+  // 国际版文本模型
   "codestral-latest",
   "codestral-2412",
   "mistral-medium-latest",
@@ -49,6 +52,9 @@ export const EXTERNAL_MODELS = [
  */
 export const ADVANCED_MULTIMODAL_MODELS = [
   "qwen3-omni-flash",
+  "gemma-3-4b-it",
+  "voxtral-mini-latest",
+  "twelvelabs-pegasus-1.2",
 ];
 
 // =============================================================================

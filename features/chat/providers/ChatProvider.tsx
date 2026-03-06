@@ -39,6 +39,10 @@ import {
   downloadMessage,
 } from "@/utils";
 import { GENERAL_MODEL_ID } from "@/utils/model-limits";
+import {
+  getRecommendedModelForMedia,
+  supportsMediaKind,
+} from "@/utils/model-capabilities";
 import { useLanguage } from "@/context/LanguageContext";
 import { createLocalizedTextGetter } from "@/lib/localization";
 import { IS_DOMESTIC_VERSION } from "@/config";
@@ -411,8 +415,12 @@ export default function ChatProvider({
   const defaultExternalModelId = useMemo(() => {
     const targetCategory = isDomesticVersion ? "domestic" : "international";
     const candidates = externalModels.filter((m) => m.category === targetCategory);
-    const multi = candidates.find((m) => m.modality === "multimodal");
-    return multi?.id || candidates[0]?.id || "qwen3-omni-flash";
+    if (isDomesticVersion) {
+      const multimodal = candidates.find((m) => m.modality === "multimodal");
+      return multimodal?.id || candidates[0]?.id || GENERAL_MODEL_ID;
+    }
+    const text = candidates.find((m) => m.modality !== "multimodal");
+    return text?.id || candidates[0]?.id || GENERAL_MODEL_ID;
   }, [externalModels, isDomesticVersion]);
 
   // Destructure camera state
@@ -933,7 +941,11 @@ const loadMessagesForConversation = useCallback(
           // keep current selection but do not auto-load messages
           const current = mapped.find((c) => c.id === currentId);
           if (current) {
-            setSelectedModelType(current.modelType || "external");
+            setSelectedModelType(
+              (current.modelType || "external").toLowerCase() === "advanced_multimodal"
+                ? "external"
+                : (current.modelType || "external")
+            );
             setSelectedModel(
               current.model ||
                 (current.modelType === "general" || current.modelType === "morngpt"
@@ -1423,7 +1435,7 @@ const loadMessagesForConversation = useCallback(
     setUploadedFiles,
     fileInputRef,
   } = fileAttachments;
-  const allowAudioUpload = isDomestic;
+  const allowAudioUpload = true;
 
   // Upload size limits (exposed to client via NEXT_PUBLIC_*, fallback to server vars)
   const rawImageLimit =
@@ -1449,12 +1461,13 @@ const loadMessagesForConversation = useCallback(
   const AUDIO_UPLOAD_DISABLED = AUDIO_LIMIT_MB <= 0;
 
   const uploadToCloudbase = async (file: File, kind: "image" | "video" | "audio") => {
+    const apiPrefix = isDomesticVersion ? "domestic" : "international";
     const endpoint =
       kind === "video"
-        ? "/api/domestic/video/upload"
+        ? `/api/${apiPrefix}/video/upload`
         : kind === "audio"
-          ? "/api/domestic/audio/upload"
-          : "/api/domestic/upload";
+          ? `/api/${apiPrefix}/audio/upload`
+          : `/api/${apiPrefix}/upload`;
     const form = new FormData();
     form.append("file", file);
     const res = await fetch(endpoint, {
@@ -1472,10 +1485,10 @@ const loadMessagesForConversation = useCallback(
   const clearUploadsAndRemote = useCallback(async () => {
     const fileIds = uploadedFiles.map((f) => f.fileId).filter(Boolean) as string[];
     setUploadedFiles([]);
-    if (!IS_DOMESTIC_VERSION) return;
     if (!fileIds.length) return;
     try {
-      await fetch("/api/domestic/media/delete", {
+      const apiPrefix = isDomesticVersion ? "domestic" : "international";
+      await fetch(`/api/${apiPrefix}/media/delete`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -1484,20 +1497,11 @@ const loadMessagesForConversation = useCallback(
     } catch (err) {
       if (false) console.warn("[media/delete] client cleanup failed", err);
     }
-  }, [uploadedFiles, setUploadedFiles]);
+  }, [uploadedFiles, setUploadedFiles, isDomesticVersion]);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     if (!files) return;
-    if (!IS_DOMESTIC_VERSION) {
-      setUploadError(
-        activeLanguage === "zh"
-          ? "国际版暂未接入多模态模型，文件上传已禁用。"
-          : "File upload is disabled on the international build."
-      );
-      event.target.value = "";
-      return;
-    }
     const currentChat = chatSessions.find((c) => c.id === currentChatId);
     const incoming = Array.from(files);
     if (uploadedFiles.length >= MAX_FILES_LIMIT) {
@@ -1513,6 +1517,7 @@ const loadMessagesForConversation = useCallback(
     // Enforce single media category at a time
     const existingKind = uploadedFiles[0]?.kind ?? null;
     let sessionKind: AttachmentItem["kind"] | null = existingKind ?? null;
+    const scope = isDomesticVersion ? "domestic" : "international";
     const typeMismatchMessage =
       activeLanguage === "zh"
         ? "不同类型的文件不能同时上传，请先清空已选文件。"
@@ -1544,31 +1549,49 @@ const loadMessagesForConversation = useCallback(
       if (!sessionKind) {
         sessionKind = currentKind;
       } else if (currentKind !== sessionKind) {
-      setUploadError(typeMismatchMessage);
-      continue;
-    }
-
-      // 如果当前对话已锁定为非 omni，阻止上传
-      const lockedNonOmni =
-        currentChat &&
-        currentChat.isModelLocked &&
-        (currentChat.model || "").toLowerCase() !== "qwen3-omni-flash";
-      if (lockedNonOmni) {
-        setUploadError(
-          activeLanguage === "zh"
-            ? "当前对话已锁定为文字模型，无法上传图片/视频/音频。请新建对话并选择 Qwen3-Omni-Flash。"
-            : "This chat is locked to a text model. Start a new chat with Qwen3-Omni-Flash to upload media."
-        );
-        event.target.value = "";
-        return;
+        setUploadError(typeMismatchMessage);
+        continue;
       }
-      // 自动切换到 omni 模型，保证 UI 立即更新
-      setSelectedModelType("advanced_multimodal");
-      setSelectedModel("qwen3-omni-flash");
+
+      const mediaKind = currentKind as "image" | "video" | "audio";
+      const recommendedModel = getRecommendedModelForMedia(scope, mediaKind);
+      const recommendedModelId = recommendedModel?.id || "";
+      const mediaLabelZh =
+        mediaKind === "image" ? "图片" : mediaKind === "video" ? "视频" : "音频";
+      const mediaLabelEn =
+        mediaKind === "image" ? "image" : mediaKind === "video" ? "video" : "audio";
+
+      if (currentChat && currentChat.isModelLocked) {
+        const lockedModelId = currentChat.model || "";
+        if (!supportsMediaKind(lockedModelId, mediaKind)) {
+          setUploadError(
+            activeLanguage === "zh"
+              ? `当前对话已锁定模型不支持${mediaLabelZh}上传，请新建对话并选择 ${recommendedModelId || "对应模型"}。`
+              : `This chat is locked to a model that does not support ${mediaLabelEn} upload. Start a new chat and use ${recommendedModelId || "a compatible model"}.`
+          );
+          event.target.value = "";
+          return;
+        }
+      }
+
+      const selectedModelId = selectedModel || "";
+      if (!supportsMediaKind(selectedModelId, mediaKind)) {
+        if (!recommendedModelId) {
+          setUploadError(
+            activeLanguage === "zh"
+              ? `当前版本未配置支持${mediaLabelZh}上传的模型。`
+              : `No model is configured for ${mediaLabelEn} upload on this build.`
+          );
+          event.target.value = "";
+          return;
+        }
+        setSelectedModelType("external");
+        setSelectedModel(recommendedModelId);
+      }
 
       if (isAudio) {
         if (!allowAudioUpload) {
-          setUploadError("当前环境仅国内版支持音频上传。");
+          setUploadError("音频上传当前不可用。");
           continue;
         }
         if (AUDIO_UPLOAD_DISABLED) {
@@ -1602,7 +1625,7 @@ const loadMessagesForConversation = useCallback(
               format: file.name.split(".").pop()?.toLowerCase(),
             },
           ]);
-        } catch (err) {
+        } catch {
           URL.revokeObjectURL(preview);
           setUploadError("音频上传失败，请重试。");
         } finally {
@@ -1634,7 +1657,7 @@ const loadMessagesForConversation = useCallback(
             ...prev,
             { ...baseItem, fileId, preview: tempUrl || preview },
           ]);
-        } catch (err) {
+        } catch {
           URL.revokeObjectURL(preview);
           setUploadError("图片上传失败，请重试。");
         } finally {
@@ -1657,7 +1680,7 @@ const loadMessagesForConversation = useCallback(
             ...prev,
             { ...baseItem, fileId, preview: tempUrl || preview },
           ]);
-        } catch (err) {
+        } catch {
           URL.revokeObjectURL(preview);
           setUploadError("视频上传失败，请重试。");
         } finally {
@@ -1666,6 +1689,9 @@ const loadMessagesForConversation = useCallback(
       } else {
         setUploadedFiles((prev) => [...prev, baseItem]);
       }
+
+      event.target.value = "";
+      continue;
     }
 
     event.target.value = "";
@@ -1674,22 +1700,23 @@ const loadMessagesForConversation = useCallback(
   const removeAttachment = async (index: number) => {
     const target = uploadedFiles[index];
     if (!target) return;
+    const apiPrefix = isDomesticVersion ? "domestic" : "international";
 
     // Clean remote file if uploaded
     try {
       if (target.fileId && target.kind === "image") {
         await fetch(
-          `/api/domestic/upload?fileId=${encodeURIComponent(target.fileId)}`,
+          `/api/${apiPrefix}/upload?fileId=${encodeURIComponent(target.fileId)}`,
           { method: "DELETE", credentials: "include" }
         );
       } else if (target.fileId && target.kind === "video") {
         await fetch(
-          `/api/domestic/video/upload?fileId=${encodeURIComponent(target.fileId)}`,
+          `/api/${apiPrefix}/video/upload?fileId=${encodeURIComponent(target.fileId)}`,
           { method: "DELETE", credentials: "include" }
         );
       } else if (target.fileId && target.kind === "audio") {
         await fetch(
-          `/api/domestic/audio/upload?fileId=${encodeURIComponent(target.fileId)}`,
+          `/api/${apiPrefix}/audio/upload?fileId=${encodeURIComponent(target.fileId)}`,
           { method: "DELETE", credentials: "include" }
         );
       }
@@ -2645,8 +2672,13 @@ const loadMessagesForConversation = useCallback(
 
   // 清理非 omni 模型下的已上传媒体
   useEffect(() => {
-    const isOmni = (selectedModel || "").toLowerCase() === "qwen3-omni-flash";
-    if (!isOmni && uploadedFiles.length > 0) {
+    const hasIncompatibleUpload = uploadedFiles.some((file) => {
+      if (file.kind !== "image" && file.kind !== "video" && file.kind !== "audio") {
+        return false;
+      }
+      return !supportsMediaKind(selectedModel || "", file.kind);
+    });
+    if (hasIncompatibleUpload && uploadedFiles.length > 0) {
       void clearUploadsAndRemote();
     }
   }, [selectedModel, selectedModelType, uploadedFiles, clearUploadsAndRemote]);
@@ -2683,7 +2715,7 @@ const loadMessagesForConversation = useCallback(
       const IconComponent = category?.icon || MessageSquare;
       return <IconComponent className="w-3 h-3" />;
     }
-    if (selectedModelType === "external" && selectedModel) {
+    if ((selectedModelType === "external" || selectedModelType === "advanced_multimodal") && selectedModel) {
       // 查找选中的外部模型
       const model = externalModels.find(
         (m) => m.id.toLowerCase() === selectedModel.toLowerCase() ||
@@ -2692,6 +2724,12 @@ const loadMessagesForConversation = useCallback(
       if (model) {
         // 多模态模型使用图像图标
         if (model.modality === "multimodal") {
+          if (model.supportsVideo === true) {
+            return <Film className="w-3 h-3" />;
+          }
+          if (model.supportsAudio === true) {
+            return <Mic className="w-3 h-3" />;
+          }
           return <Image className="w-3 h-3" />;
         }
         // 代码模型
@@ -2711,6 +2749,10 @@ const loadMessagesForConversation = useCallback(
             return <Cpu className="w-3 h-3" />;
           case "mistral":
             return <Wind className="w-3 h-3" />;
+          case "gemini":
+            return <Sparkles className="w-3 h-3" />;
+          case "twelvelabs":
+            return <Film className="w-3 h-3" />;
           default:
             return <Bot className="w-3 h-3" />;
         }
@@ -4298,7 +4340,11 @@ const loadMessagesForConversation = useCallback(
           setMessages(chat.messages || []);
           // Load messages only when user selects
           void loadMessagesForConversation(chatId);
-          setSelectedModelType(chat.modelType || "general");
+          setSelectedModelType(
+            (chat.modelType || "general").toLowerCase() === "advanced_multimodal"
+              ? "external"
+              : (chat.modelType || "general")
+          );
           setSelectedModel(
             chat.model ||
               (chat.modelType === "general" || chat.modelType === "morngpt"
@@ -4378,7 +4424,11 @@ const loadMessagesForConversation = useCallback(
           const nextChat = updatedChats[0];
           setCurrentChatId(nextChat.id);
           currentChatIdRef.current = nextChat.id;
-          setSelectedModelType(nextChat.modelType || "external");
+          setSelectedModelType(
+            (nextChat.modelType || "external").toLowerCase() === "advanced_multimodal"
+              ? "external"
+              : (nextChat.modelType || "external")
+          );
           setSelectedModel(
             nextChat.model ||
               (nextChat.modelType === "general" || nextChat.modelType === "morngpt"

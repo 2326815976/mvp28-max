@@ -19,9 +19,11 @@ export interface AuthResult {
  * 2. Supabase 认证
  */
 export async function getUserFromRequest(req: NextRequest): Promise<AuthResult | null> {
-  // 尝试从 Authorization header 获取自定义 JWT token（Android Native Google Sign-In）
+  // 优先读取 custom-jwt-token cookie，其次读取 Authorization header
+  const cookieToken = req.cookies.get("custom-jwt-token")?.value;
   const authHeader = req.headers.get("authorization");
-  const customToken = authHeader?.replace(/^Bearer\s+/i, "");
+  const headerToken = authHeader?.replace(/^Bearer\s+/i, "");
+  const customToken = cookieToken || headerToken || null;
 
   if (customToken) {
     // 使用自定义 JWT 认证（Android Native Google Sign-In）

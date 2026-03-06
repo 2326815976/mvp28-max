@@ -167,8 +167,8 @@
 
   .chat-bubble-container img,
   .chat-bubble-container video {
-    max-width: 100% !important;
-    height: auto !important;
+    max-width: 100%;
+    height: auto;
   }
 
   .chat-bubble-container table {

@@ -21,7 +21,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const PROVIDER_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
-const DOMESTIC_GENERAL_MODEL_ID = "qwen-turbo";
+const DOMESTIC_GENERAL_MODEL_ID = "qwen3.5-flash";
 
 // 游客试用配置
 const GUEST_MAX_CONTEXT = 10; // 游客最大上下文消息数
@@ -118,6 +118,60 @@ const getDashScopeProvider = (modelId: string) => {
     },
   };
 };
+
+type DashScopeErrorPayload = {
+  error?: {
+    message?: string;
+    type?: string;
+    code?: string;
+    param?: unknown;
+  };
+  message?: string;
+  code?: string;
+};
+
+function normalizeDashScopeError(
+  statusCode: number,
+  rawErrorText: string,
+  language?: string,
+) {
+  const trimmed = rawErrorText.trim();
+  let parsed: DashScopeErrorPayload | null = null;
+
+  if (trimmed.startsWith("{")) {
+    try {
+      parsed = JSON.parse(trimmed) as DashScopeErrorPayload;
+    } catch {
+      parsed = null;
+    }
+  }
+
+  const upstreamCode = parsed?.error?.code || parsed?.error?.type || parsed?.code || "";
+  const upstreamMessage = parsed?.error?.message || parsed?.message || trimmed || "Upstream error";
+  const normalizedCode = upstreamCode.toLowerCase();
+  const normalizedMessage = upstreamMessage.toLowerCase();
+
+  const isFreeTierOnlyError =
+    normalizedCode.includes("allocationquota.freetieronly") ||
+    (normalizedMessage.includes("free tier") && normalizedMessage.includes("exhaust"));
+
+  if (isFreeTierOnlyError) {
+    return {
+      statusCode: 402,
+      code: upstreamCode || "AllocationQuota.FreeTierOnly",
+      message:
+        language === "zh"
+          ? "DashScope 免费额度已用完。请在阿里云百炼控制台关闭“仅免费额度”模式或充值后重试。"
+          : "DashScope free tier is exhausted. Disable \"use free tier only\" or top up your account and retry.",
+    };
+  }
+
+  return {
+    statusCode,
+    code: upstreamCode || undefined,
+    message: upstreamMessage,
+  };
+}
 
 function extractDelta(data: any): string {
   const choice = data?.choices?.[0];
@@ -535,10 +589,25 @@ export async function POST(req: Request) {
 
     if (!upstream.ok || !upstream.body) {
       const errText = await upstream.text();
-      return new Response(JSON.stringify({ success: false, error: errText || "Upstream error" }), {
-        status: upstream.status || 500,
-        headers: { "Content-Type": "application/json" },
+      const normalizedError = normalizeDashScopeError(upstream.status || 500, errText, language);
+      console.warn("[stream-guest] upstream rejected", {
+        status: upstream.status,
+        mappedStatus: normalizedError.statusCode,
+        code: normalizedError.code,
+        message: normalizedError.message,
       });
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: normalizedError.message,
+          code: normalizedError.code,
+          upstreamStatus: upstream.status || 500,
+        }),
+        {
+          status: normalizedError.statusCode,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
     }
 
     const stream = new TransformStream();

@@ -13,6 +13,10 @@ import {
   getProContextMsgLimit,
   getEnterpriseContextMsgLimit,
 } from "@/utils/model-limits";
+import {
+  getRecommendedModelForMedia,
+  supportsMediaKind,
+} from "@/utils/model-capabilities";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 // 覆盖对话确认状态类型
@@ -198,8 +202,13 @@ export const useMessageSubmission = (
       console.log("[useMessageSubmission] Guest mode enabled, forcing General Model");
     }
 
-    // Determine language for request headers; keep UI language unchanged
-    const detectedLanguage = selectedLanguage || detectLanguage(prompt);
+    // Determine language for request headers.
+    // If the current input contains Chinese, force zh so multimodal prompts also answer in Chinese.
+    const promptDetectedLanguage = detectLanguage(prompt || "");
+    const detectedLanguage =
+      promptDetectedLanguage === "zh"
+        ? "zh"
+        : (selectedLanguage || promptDetectedLanguage);
     // Effective model (may switch to omni when uploading media)
     // 移动端访客模式强制使用 General Model
     let effectiveModelType = allowGuestSubmit ? "general" : selectedModelType;
@@ -297,7 +306,7 @@ export const useMessageSubmission = (
     let persistedModelId =
       effectiveModelType === "general"
         ? GENERAL_MODEL_ID
-        : effectiveSelectedModel || "qwen3-omni-flash";
+        : effectiveSelectedModel || GENERAL_MODEL_ID;
     // UI display label: Expert(MornGPT) should show the expert name, not the underlying model id.
     let currentModel = displayModelName;
     const currentChat = chatSessions.find((c) => c.id === currentChatId);
@@ -308,23 +317,72 @@ export const useMessageSubmission = (
     // 移动端访客模式也视为 Free 用户（使用本地对话，不落库）
     const isFreeUser = effectivePlanLower === "free" || allowGuestSubmit;
 
-    // 如果已有对话锁定为文字模型，阻止媒体上传；新建/未锁定则自动切换到 Qwen3-Omni-Flash
+    // 媒体上传按当前模型能力校验，不再强制切换固定模型
     if (hasMediaUpload) {
-      if (currentChat && currentChat.isModelLocked && (currentChat.model || "").toLowerCase() !== "qwen3-omni-flash") {
-        alert(
-          selectedLanguage === "zh"
-            ? "当前对话已锁定为文字模型，无法上传图片/视频/音频。请新建对话并选择 Qwen3-Omni-Flash。"
-            : "This conversation is locked to a text model. Start a new chat with Qwen3-Omni-Flash to upload media."
+      const requestedKinds: Array<"image" | "video" | "audio"> = [];
+      if (imageFileIds.length > 0) requestedKinds.push("image");
+      if (videoFileIds.length > 0) requestedKinds.push("video");
+      if (audioFileIds.length > 0) requestedKinds.push("audio");
+      const scope = IS_DOMESTIC_VERSION ? "domestic" : "international";
+
+      if (currentChat && currentChat.isModelLocked) {
+        const lockedModelId = currentChat.model || "";
+        const unsupportedKind = requestedKinds.find(
+          (kind) => !supportsMediaKind(lockedModelId, kind)
         );
-        releaseLock();
-        return;
+        if (unsupportedKind) {
+          const recommended = getRecommendedModelForMedia(scope, unsupportedKind);
+          const mediaLabelZh =
+            unsupportedKind === "image"
+              ? "图片"
+              : unsupportedKind === "video"
+                ? "视频"
+                : "音频";
+          const mediaLabelEn =
+            unsupportedKind === "image"
+              ? "image"
+              : unsupportedKind === "video"
+                ? "video"
+                : "audio";
+          alert(
+            selectedLanguage === "zh"
+              ? `当前对话已锁定模型不支持${mediaLabelZh}上传。请新建对话并选择 ${recommended?.id || "兼容模型"}。`
+              : `This conversation is locked to a model that does not support ${mediaLabelEn} upload. Start a new chat and select ${recommended?.id || "a compatible model"}.`
+          );
+          releaseLock();
+          return;
+        }
       }
-      effectiveModelType = "advanced_multimodal";
-      effectiveSelectedModel = "qwen3-omni-flash";
-      persistedModelId = "qwen3-omni-flash";
-      currentModel = "qwen3-omni-flash";
-      setSelectedModelType("advanced_multimodal");
-      setSelectedModel("qwen3-omni-flash");
+
+      const unsupportedCurrentKind = requestedKinds.find(
+        (kind) => !supportsMediaKind(effectiveSelectedModel || "", kind)
+      );
+      if (unsupportedCurrentKind) {
+        const recommended = getRecommendedModelForMedia(scope, unsupportedCurrentKind);
+        if (!recommended) {
+          const mediaLabel =
+            unsupportedCurrentKind === "image"
+              ? (selectedLanguage === "zh" ? "图片" : "image")
+              : unsupportedCurrentKind === "video"
+                ? (selectedLanguage === "zh" ? "视频" : "video")
+                : selectedLanguage === "zh"
+                  ? "音频"
+                  : "audio";
+          alert(
+            selectedLanguage === "zh"
+              ? `当前版本未配置支持${mediaLabel}上传的模型。`
+              : `No model is configured for ${mediaLabel} upload on this build.`
+          );
+          releaseLock();
+          return;
+        }
+        effectiveSelectedModel = recommended.id;
+        persistedModelId = recommended.id;
+        currentModel = recommended.name;
+        setSelectedModel(recommended.id);
+      }
+      effectiveModelType = "external";
+      setSelectedModelType("external");
     }
 
     const resolveExpertModelId = (value?: string | null) => {
@@ -601,15 +659,12 @@ export const useMessageSubmission = (
               console.log('[saveMessage] Using custom JWT token');
             } else {
               console.warn('[saveMessage] No accessToken in app-auth-state');
-              alert('[DEBUG] 警告：localStorage 中没有 accessToken');
             }
           } else {
             console.warn('[saveMessage] No app-auth-state in localStorage');
-            alert('[DEBUG] 警告：localStorage 中没有 app-auth-state');
           }
         } catch (e) {
           console.error('[saveMessage] Failed to read auth state:', e);
-          alert('[DEBUG] 错误：读取认证状态失败 - ' + e);
         }
 
         const res = await fetch(`/api/conversations/${conversationId}/messages`, {
@@ -631,7 +686,6 @@ export const useMessageSubmission = (
         if (!res.ok) {
           const errorText = await res.text().catch(() => 'Unable to read error');
           console.error('[saveMessage] Failed with status:', res.status, errorText);
-          alert(`[DEBUG] 保存消息失败\n状态码: ${res.status}\n错误: ${errorText}\nConversation ID: ${conversationId}`);
         }
 
         if (res.status === 402) {
@@ -834,14 +888,6 @@ export const useMessageSubmission = (
           modelId = effectiveSelectedModel;
         }
 
-        // If包含图片/视频，强制用多模态模型（对标 Qwen Demo）
-        const hasMedia = uploadedFiles.some(
-          (f) => f.kind === "image" || f.kind === "video" || f.kind === "audio",
-        );
-        if (hasMedia) {
-          modelId = "qwen3-omni-flash";
-        }
-
         // Create message ID for tracking
         const aiMessageId = (Date.now() + 1).toString();
         let streamedContent = "";
@@ -867,16 +913,10 @@ export const useMessageSubmission = (
         setIsStreaming(true);
         // Keep isLoading true to show thinking indicator until first chunk arrives
 
-        // 国际版接口不接受多模态字段，将历史与媒体字段裁剪为纯文本
-        const historyForSend = IS_DOMESTIC_VERSION
-          ? historyMessages
-          : historyMessages.map((msg) => ({
-              role: msg.role as "user" | "assistant" | "system",
-              content: msg.content,
-            }));
-        const sendImages = IS_DOMESTIC_VERSION ? userMessage.images : undefined;
-        const sendVideos = IS_DOMESTIC_VERSION ? userMessage.videos : undefined;
-        const sendAudios = IS_DOMESTIC_VERSION ? (userMessage as any).audios : undefined;
+        const historyForSend = historyMessages;
+        const sendImages = userMessage.images;
+        const sendVideos = userMessage.videos;
+        const sendAudios = (userMessage as any).audios;
 
         // Minimal terminal log to help diagnose media payload
         console.log("[media][client] sendMessageStream payload", {
@@ -905,7 +945,7 @@ export const useMessageSubmission = (
           await apiService.sendMessageStream(
             userMessage.content,
             modelId,
-            undefined,
+            conversationId,
             token,
             detectedLanguage,
             historyForSend,
